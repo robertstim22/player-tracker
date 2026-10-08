@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Player Tracker</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#14181f; --muted:#667085; --line:#e4e7ec; --accent:#1a56db; --live:#d92d20; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e1116; --card:#171b22; --text:#e8ebf0; --muted:#8b93a1; --line:#262c36; --accent:#6ea0ff; --live:#ff6b5e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui,-apple-system,sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:baseline; justify-content:space-between; padding:20px 16px 8px; max-width:1100px; margin:0 auto; }
+  h1 { margin:0; font-size:22px; }
+  #status { color:var(--muted); font-size:13px; }
+  .banner { max-width:1100px; margin:4px auto 0; padding:0 16px; color:var(--muted); font-size:13px; }
+  main { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:14px; max-width:1100px; margin:12px auto 40px; padding:0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card h2 { margin:0; font-size:18px; }
+  .team { color:var(--muted); font-size:13px; margin-bottom:10px; }
+  .game { border-top:1px solid var(--line); padding:10px 0 2px; margin-top:10px; }
+  .game:first-of-type { margin-top:0; }
+  .gh { display:flex; justify-content:space-between; font-size:13px; color:var(--muted); }
+  .result { font-weight:600; color:var(--text); }
+  .stats { display:flex; flex-wrap:wrap; gap:4px 18px; margin:6px 0; }
+  .stat b { font-size:17px; font-variant-numeric:tabular-nums; }
+  .stat span { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; margin-left:3px; }
+  .cat { width:100%; font-size:11px; color:var(--accent); text-transform:uppercase; letter-spacing:.06em; }
+  .season { background:var(--bg); border-radius:8px; padding:8px 10px; margin-top:12px; }
+  .season .lbl { font-size:12px; color:var(--muted); font-weight:600; }
+  .none { color:var(--muted); font-size:13px; }
+  .tag { font-size:11px; padding:1px 6px; border-radius:99px; border:1px solid var(--line); margin-left:6px; }
+  .tag.live { color:var(--live); border-color:var(--live); }
+  .controls { max-width:1100px; margin:10px auto 0; padding:0 16px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .controls input { flex:1 1 180px; min-width:0; padding:8px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--text); font:inherit; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { border:1px solid var(--line); background:var(--card); color:var(--text); padding:4px 10px; border-radius:99px; font:inherit; font-size:13px; cursor:pointer; }
+  .chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .pos { display:inline-block; font-size:11px; font-weight:700; padding:1px 6px; border-radius:6px; background:var(--bg); color:var(--accent); margin-right:6px; }
+  .tag.v { color:var(--muted); }
+  .tag.p { color:var(--accent); border-color:var(--accent); }
+  details > summary { cursor:pointer; color:var(--muted); font-size:13px; margin-top:10px; list-style:none; }
+  details > summary::before { content:"▸ "; } details[open] > summary::before { content:"▾ "; }
+  .err { color:var(--live); font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Player Tracker</h1>
+  <div id="status">Loading…</div>
+</header>
+<div class="controls">
+  <input id="q" type="search" placeholder="Search player or team…">
+  <div class="chips" id="groups"></div>
+  <div class="chips" id="positions"></div>
+</div>
+<div class="banner" id="banner"></div>
+<main id="grid"></main>
+<script>
+const REFRESH_MS = 2 * 60 * 1000; // re-check data file every 2 min
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function statsHtml(cats) {
+  const names = Object.keys(cats || {});
+  if (!names.length) return "";
+  return `<div class="stats">` + names.map((c) =>
+    `<div class="cat">${esc(c)}</div>` +
+    Object.entries(cats[c]).map(([k, v]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("")
+  ).join("") + `</div>`;
+}
+
+function gameHtml(g) {
+  const when = new Date(g.date);
+  const started = when <= new Date();
+  const live = g.live ?? (started && !g.completed && Date.now() - when < 5 * 3600e3);
+  const vs = `${g.home ? "vs" : "@"} ${esc(g.opponent)}`;
+  let right;
+  if (g.completed && g.score) {
+    const w = g.score.team > g.score.opp;
+    right = `<span class="result">${w ? "W" : "L"} ${g.score.team}–${g.score.opp}</span>`;
+  } else if (live) {
+    right = `<span class="tag live">LIVE</span>`;
+  } else {
+    right = when.toLocaleString([], { weekday:"short", hour:"numeric", minute:"2-digit" });
+  }
+  const body = statsHtml(g.stats) || `<div class="none">${g.completed || live ? "No stats posted yet" : "Upcoming"}</div>`;
+  return `<div class="game"><div class="gh"><span>Wk ${g.week} · ${vs}</span>${right}</div>${body}</div>`;
+}
+
+const GROUPS = [["all","All"],["roster","Roster"],["nil","NIL"],["prospect","2027 Prospects"]];
+const POS_ORDER = ["QB","RB","WR","TE","OL","DE","DT","LB","CB","S"];
+const filter = { group:"all", pos:"all", q:"" };
+let DATA = null;
+
+function cardHtml(p) {
+  const played = p.games.filter((g) => new Date(g.date) <= new Date());
+  const next = p.games.find((g) => new Date(g.date) > new Date());
+  const recent = [...played].reverse().slice(0, 3);
+  const [latest, ...older] = recent;
+  const tags = (p.groups.includes("prospect") ? `<span class="tag p">2027 prospect</span>` : "") +
+               (p.groups.includes("nil") ? `<span class="tag">NIL</span>` : "") +
+               (p.verbal ? `<span class="tag v">Verbal / not signed</span>` : "");
+  let body;
+  if (p.verbal) body = `<div class="none">Not signed yet — no stats to track.</div>`;
+  else if (!latest) body = `<div class="none">No games played yet.</div>`;
+  else body = gameHtml(latest);
+  if (!p.verbal && !latest && next) body += gameHtml(next);
+  const more = older.length || Object.keys(p.season || {}).length
+    ? `<details><summary>Earlier games &amp; season totals</summary>${older.map(gameHtml).join("")}
+       ${Object.keys(p.season).length ? `<div class="season"><div class="lbl">Season totals</div>${statsHtml(p.season)}</div>` : ""}</details>` : "";
+  const nextLine = latest && next ? `<div class="none" style="margin-top:8px">Next: ${next.home ? "vs" : "@"} ${esc(next.opponent)}, ${new Date(next.date).toLocaleString([], { weekday:"short", hour:"numeric", minute:"2-digit" })}</div>` : "";
+  return `<section class="card">
+    <h2><span class="pos">${esc(p.pos)}</span>${esc(p.name)}</h2>
+    <div class="team">${esc(p.team)} ${tags}</div>
+    ${p.error ? `<div class="err">Couldn't load: ${esc(p.error)}</div>` : ""}
+    ${body}${nextLine}${more}
+  </section>`;
+}
+
+function chips(el, items, key) {
+  el.innerHTML = items.map(([v, label]) => `<button class="chip${filter[key] === v ? " on" : ""}" data-v="${esc(v)}">${esc(label)}</button>`).join("");
+}
+
+function render() {
+  if (!DATA) return;
+  const q = filter.q.toLowerCase();
+  const list = DATA.players.filter((p) =>
+    (filter.group === "all" || p.groups.includes(filter.group)) &&
+    (filter.pos === "all" || p.pos === filter.pos) &&
+    (!q || `${p.name} ${p.team}`.toLowerCase().includes(q)));
+  // Players with a game in progress first, then most recent game, then name.
+  const rank = (p) => p.games.some((g) => g.live) ? 0 : 1;
+  const last = (p) => p.games.filter((g) => new Date(g.date) <= new Date()).at(-1)?.date ?? "";
+  list.sort((a, b) => rank(a) - rank(b) || last(b).localeCompare(last(a)) || a.name.localeCompare(b.name));
+  $("grid").innerHTML = list.map(cardHtml).join("") || `<div class="none">No players match.</div>`;
+  const present = POS_ORDER.filter((x) => DATA.players.some((p) => p.pos === x));
+  chips($("groups"), GROUPS, "group");
+  chips($("positions"), [["all","All positions"], ...present.map((x) => [x, x])], "pos");
+}
+
+async function load() {
+  try {
+    const res = await fetch(`data/stats.json?t=${Date.now()}`, { cache: "no-store" });
+    DATA = await res.json();
+    $("banner").textContent = DATA.demo ? "Showing sample data — not real stats." : "";
+    $("status").textContent = `Updated ${new Date(DATA.updatedAt).toLocaleString([], { weekday:"short", hour:"numeric", minute:"2-digit" })}`;
+    render();
+  } catch (e) {
+    $("status").textContent = "Couldn't load stats — will retry";
+  }
+}
+$("q").addEventListener("input", (e) => { filter.q = e.target.value; render(); });
+for (const [id, key] of [["groups","group"],["positions","pos"]]) {
+  $(id).addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (b) { filter[key] = b.dataset.v; render(); } });
+}
+load();
+setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>

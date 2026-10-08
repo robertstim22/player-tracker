@@ -1,0 +1,10 @@
+[
+  {"name":"Xavier Lucas","team":"Miami","pos":"CB","groups":["roster","prospect"],"season":{"defensive":{"TOT":21,"SOLO":14,"PD":4,"INT":1}},
+   "games":[
+    {"week":5,"date":"2026-10-03T19:30:00.000Z","opponent":"Florida State","home":true,"completed":true,"live":false,"score":{"team":31,"opp":24},"stats":{"defensive":{"TOT":6,"SOLO":4,"PD":2,"INT":1}}},
+    {"week":4,"date":"2026-09-26T19:30:00.000Z","opponent":"Louisville","home":false,"completed":true,"live":false,"score":{"team":27,"opp":17},"stats":{"defensive":{"TOT":4,"SOLO":3,"PD":1}}}]},
+  {"name":"Ca'Lil Valentine","team":"Illinois","pos":"RB","groups":["roster","prospect"],"season":{"rushing":{"CAR":88,"YDS":512,"TD":6}},
+   "games":[
+    {"week":5,"date":"2026-10-03T23:30:00.000Z","opponent":"Purdue","home":true,"completed":true,"live":false,"score":{"team":38,"opp":10},"stats":{"rushing":{"CAR":19,"YDS":121,"TD":2},"receiving":{"REC":3,"YDS":24}}}]},
+  {"name":"Elijah Cannon","team":"Kansas","pos":"CB","groups":["roster"],"verbal":true,"season":{},"games":[]}
+]
