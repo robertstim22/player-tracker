@@ -42,6 +42,17 @@
   .tag.p { color:var(--accent); border-color:var(--accent); }
   details > summary { cursor:pointer; color:var(--muted); font-size:13px; margin-top:10px; list-style:none; }
   details > summary::before { content:"▸ "; } details[open] > summary::before { content:"▾ "; }
+  .tabs { max-width:1100px; margin:10px auto 0; padding:0 16px; display:flex; gap:6px; }
+  .tab { border:0; background:none; color:var(--muted); font:inherit; font-weight:600; padding:6px 12px; border-bottom:2px solid transparent; cursor:pointer; }
+  .tab.on { color:var(--text); border-color:var(--accent); }
+  #feed { max-width:1100px; margin:12px auto 40px; padding:0 16px; display:none; }
+  #feed .row { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin-bottom:8px; }
+  #feed .row.big { border-left:4px solid var(--accent); }
+  .row .top { display:flex; justify-content:space-between; gap:8px; font-size:13px; color:var(--muted); }
+  .row .who { font-size:15px; color:var(--text); font-weight:600; }
+  .hl { display:inline-block; font-size:12px; font-weight:600; padding:2px 8px; border-radius:99px; margin:6px 6px 0 0; background:var(--bg); color:var(--text); }
+  .hl.big { background:var(--accent); color:#fff; }
+  .toggle { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--muted); margin-bottom:10px; }
   .err { color:var(--live); font-size:13px; }
 </style>
 </head>
@@ -50,13 +61,15 @@
   <h1>Player Tracker</h1>
   <div id="status">Loading…</div>
 </header>
-<div class="controls">
+<nav class="tabs"><button class="tab on" data-view="players">Players</button><button class="tab" data-view="feed">Activity</button></nav>
+<div class="controls" id="controls">
   <input id="q" type="search" placeholder="Search player or team…">
   <div class="chips" id="groups"></div>
   <div class="chips" id="positions"></div>
 </div>
 <div class="banner" id="banner"></div>
 <main id="grid"></main>
+<section id="feed"></section>
 <script>
 const REFRESH_MS = 2 * 60 * 1000; // re-check data file every 2 min
 const $ = (id) => document.getElementById(id);
@@ -69,6 +82,33 @@ function statsHtml(cats) {
     `<div class="cat">${esc(c)}</div>` +
     Object.entries(cats[c]).map(([k, v]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("")
   ).join("") + `</div>`;
+}
+
+const hlHtml = (g) => (g.highlights || []).map((h) => `<span class="hl${h.big ? " big" : ""}">${esc(h.label)}</span>`).join("");
+
+function ago(iso) {
+  const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  if (m < 48 * 60) return `${Math.round(m / 60)}h ago`;
+  return new Date(iso).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+}
+
+function renderFeed() {
+  if (!DATA) return;
+  const items = DATA.players.flatMap((p) => p.games.filter((g) => g.updatedAt && g.stats && Object.keys(g.stats).length).map((g) => ({ p, g })))
+    .sort((a, b) => b.g.updatedAt.localeCompare(a.g.updatedAt)).slice(0, 150);
+  const shown = feedBigOnly ? items.filter((x) => x.g.highlights.some((h) => h.big)) : items;
+  $("feed").innerHTML = `<label class="toggle"><input type="checkbox" id="bigOnly" ${feedBigOnly ? "checked" : ""}> Big moments only</label>` +
+    (shown.map(({ p, g }) => {
+      const vs = `${g.home ? "vs" : "@"} ${esc(g.opponent)}`;
+      const res = g.score ? (g.live ? `${g.score.team}–${g.score.opp}` : `${g.score.team > g.score.opp ? "W" : "L"} ${g.score.team}–${g.score.opp}`) : "";
+      return `<div class="row${g.highlights.some((h) => h.big) ? " big" : ""}">
+        <div class="top"><span class="who"><span class="pos">${esc(p.pos)}</span>${esc(p.name)}</span><span>${g.live ? '<span class="tag live">LIVE</span> ' : ""}${ago(g.updatedAt)}</span></div>
+        <div class="top"><span>${esc(p.team)} ${vs}</span><span>${res}</span></div>
+        ${hlHtml(g)}${statsHtml(g.stats)}</div>`;
+    }).join("") || `<div class="none">No activity yet.</div>`);
+  $("bigOnly").addEventListener("change", (e) => { feedBigOnly = e.target.checked; renderFeed(); });
 }
 
 function gameHtml(g) {
@@ -86,13 +126,13 @@ function gameHtml(g) {
     right = when.toLocaleString([], { weekday:"short", hour:"numeric", minute:"2-digit" });
   }
   const body = statsHtml(g.stats) || `<div class="none">${g.completed || live ? "No stats posted yet" : "Upcoming"}</div>`;
-  return `<div class="game"><div class="gh"><span>Wk ${g.week} · ${vs}</span>${right}</div>${body}</div>`;
+  return `<div class="game"><div class="gh"><span>Wk ${g.week} · ${vs}</span>${right}</div>${hlHtml(g)}${body}</div>`;
 }
 
 const GROUPS = [["all","All"],["roster","Roster"],["nil","NIL"],["prospect","2027 Prospects"]];
 const POS_ORDER = ["QB","RB","WR","TE","OL","DE","DT","LB","CB","S"];
 const filter = { group:"all", pos:"all", q:"" };
-let DATA = null;
+let DATA = null, view = "players", feedBigOnly = false;
 
 function cardHtml(p) {
   const played = p.games.filter((g) => new Date(g.date) <= new Date());
@@ -125,6 +165,10 @@ function chips(el, items, key) {
 
 function render() {
   if (!DATA) return;
+  $("grid").style.display = view === "players" ? "" : "none";
+  $("controls").style.display = view === "players" ? "" : "none";
+  $("feed").style.display = view === "feed" ? "block" : "none";
+  if (view === "feed") return renderFeed();
   const q = filter.q.toLowerCase();
   const list = DATA.players.filter((p) =>
     (filter.group === "all" || p.groups.includes(filter.group)) &&
@@ -151,6 +195,12 @@ async function load() {
     $("status").textContent = "Couldn't load stats — will retry";
   }
 }
+document.querySelector(".tabs").addEventListener("click", (e) => {
+  const b = e.target.closest(".tab"); if (!b) return;
+  view = b.dataset.view;
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t === b));
+  render();
+});
 $("q").addEventListener("input", (e) => { filter.q = e.target.value; render(); });
 for (const [id, key] of [["groups","group"],["positions","pos"]]) {
   $(id).addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (b) { filter[key] = b.dataset.v; render(); } });

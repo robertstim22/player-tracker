@@ -51,6 +51,34 @@ function boxLines(side, name) {
   return lines;
 }
 
+const num = (v) => parseFloat(v) || 0;
+
+// Flags worth calling out from a stat line. `big` = milestone-level.
+function highlights(stats) {
+  const out = [];
+  const add = (label, big = false) => out.push({ label, big });
+  const v = (cat, type) => num(stats[cat]?.[type]);
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  if (v("passing", "YDS") >= 300) add(`${v("passing", "YDS")} pass yds`, true);
+  if (v("rushing", "YDS") >= 100) add(`${v("rushing", "YDS")} rush yds`, true);
+  if (v("receiving", "YDS") >= 100) add(`${v("receiving", "YDS")} rec yds`, true);
+  for (const [cat, what] of [["passing", "passing"], ["rushing", "rushing"], ["receiving", "receiving"]]) {
+    if (v(cat, "TD") > 0) add(plural(v(cat, "TD"), `${what} TD`), true);
+  }
+  for (const cat of ["defensive", "interceptions", "kickReturns", "puntReturns"]) {
+    if (v(cat, "TD") > 0) add(plural(v(cat, "TD"), "defensive/return TD"), true);
+  }
+  if (v("defensive", "SACKS") >= 1) add(plural(v("defensive", "SACKS"), "sack"), v("defensive", "SACKS") >= 2);
+  if (v("interceptions", "INT") >= 1) add(plural(v("interceptions", "INT"), "INT"), true);
+  if (v("defensive", "TFL") >= 2) add(`${v("defensive", "TFL")} TFL`, v("defensive", "TFL") >= 3);
+  if (v("defensive", "PD") >= 2) add(`${v("defensive", "PD")} PD`);
+  if (v("defensive", "TOT") >= 10) add(`${v("defensive", "TOT")} tackles`, true);
+  for (const cat of ["rushing", "receiving"]) {
+    if (v(cat, "LONG") >= 50) add(`${v(cat, "LONG")}-yd ${cat === "rushing" ? "run" : "catch"}`, true);
+  }
+  return out;
+}
+
 const pkey = (p) => `${p.name}|${p.team}`;
 
 async function updateFromApi() {
@@ -60,7 +88,7 @@ async function updateFromApi() {
   const teams = new Set(active.map((p) => p.team));
   const now = Date.now();
   const cache = await readJson("../data/cache.json", {});
-  cache.boxAt ??= {}; cache.lines ??= {}; cache.scores ??= {};
+  cache.boxAt ??= {}; cache.lines ??= {}; cache.scores ??= {}; cache.changed ??= {};
   const warnings = [];
 
   // 1) Schedule + season totals, at most every ~20h.
@@ -112,7 +140,16 @@ async function updateFromApi() {
       cache.scores[g.id] = { [g.home]: sides[g.home]?.points ?? null, [g.away]: sides[g.away]?.points ?? null };
       for (const p of active.filter((p) => p.team === g.home || p.team === g.away)) {
         const side = sides[p.team];
-        if (side) (cache.lines[pkey(p)] ??= {})[g.id] = boxLines(side, p.name);
+        if (!side) continue;
+        const k = pkey(p);
+        const prev = cache.lines[k]?.[g.id];
+        const next = boxLines(side, p.name);
+        if (JSON.stringify(prev) !== JSON.stringify(next) && Object.keys(next).length) {
+          // First sighting of an already-finished game: date it to the final whistle, not "now".
+          const finished = Date.parse(g.startDate) + GAME_LEN;
+          (cache.changed[k] ??= {})[g.id] = new Date(prev === undefined && now > finished ? finished : now).toISOString();
+        }
+        (cache.lines[k] ??= {})[g.id] = next;
       }
       cache.boxAt[g.id] = new Date().toISOString();
     }
@@ -134,7 +171,9 @@ async function updateFromApi() {
         completed, live: start <= now && !completed,
         score: sc && sc[p.team] != null ? { team: sc[p.team], opp: sc[home ? g.away : g.home] } : null,
         stats: cache.lines[pkey(p)]?.[g.id] ?? {},
+        updatedAt: cache.changed[pkey(p)]?.[g.id] ?? null,
       });
+      out.games.at(-1).highlights = highlights(out.games.at(-1).stats);
     }
     return out;
   });
@@ -147,6 +186,10 @@ let result;
 if (demo) {
   const players = (await readJson("./demo-data.json")).map((p) => {
     p.games.sort((a, b) => a.date.localeCompare(b.date));
+    for (const g of p.games) {
+      g.updatedAt = Object.keys(g.stats).length ? new Date(Date.parse(g.date) + 3 * HOUR).toISOString() : null;
+      g.highlights = highlights(g.stats);
+    }
     return p;
   });
   result = { players, warnings: [] };
