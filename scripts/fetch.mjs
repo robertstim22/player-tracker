@@ -54,7 +54,7 @@ function boxLines(side, name) {
 const num = (v) => parseFloat(v) || 0;
 
 // Flags worth calling out from a stat line. `big` = milestone-level.
-function highlights(stats) {
+function highlights(stats, pos) {
   const out = [];
   const add = (label, big = false) => out.push({ label, big });
   const v = (cat, type) => num(stats[cat]?.[type]);
@@ -73,8 +73,10 @@ function highlights(stats) {
   if (v("defensive", "TFL") >= 2) add(`${v("defensive", "TFL")} TFL`, v("defensive", "TFL") >= 3);
   if (v("defensive", "PD") >= 2) add(`${v("defensive", "PD")} PD`);
   if (v("defensive", "TOT") >= 10) add(`${v("defensive", "TOT")} tackles`, true);
+  if (v("fumbles", "REC") >= 1) add(plural(v("fumbles", "REC"), "fumble recovery"), true);
+  const longMin = pos === "QB" ? 50 : 20; // QBs run less often; 20 yards is a big play for everyone else
   for (const cat of ["rushing", "receiving"]) {
-    if (v(cat, "LONG") >= 50) add(`${v(cat, "LONG")}-yd ${cat === "rushing" ? "run" : "catch"}`, true);
+    if (v(cat, "LONG") >= longMin) add(`${v(cat, "LONG")}-yd ${cat === "rushing" ? "run" : "catch"}`, true);
   }
   return out;
 }
@@ -173,7 +175,7 @@ async function updateFromApi() {
         stats: cache.lines[pkey(p)]?.[g.id] ?? {},
         updatedAt: cache.changed[pkey(p)]?.[g.id] ?? null,
       });
-      out.games.at(-1).highlights = highlights(out.games.at(-1).stats);
+      out.games.at(-1).highlights = highlights(out.games.at(-1).stats, p.pos);
     }
     return out;
   });
@@ -188,7 +190,7 @@ if (demo) {
     p.games.sort((a, b) => a.date.localeCompare(b.date));
     for (const g of p.games) {
       g.updatedAt = Object.keys(g.stats).length ? new Date(Date.parse(g.date) + 3 * HOUR).toISOString() : null;
-      g.highlights = highlights(g.stats);
+      g.highlights = highlights(g.stats, p.pos);
     }
     return p;
   });
