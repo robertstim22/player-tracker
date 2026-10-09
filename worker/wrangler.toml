@@ -1,0 +1,12 @@
+name = "player-tracker-cron"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+REPO = "robertstim22/player-tracker"
+WORKFLOW = "refresh.yml"
+BRANCH = "main"
+
+# Every 30 min Thu-Sat (UTC), plus Sunday 00:00-06:30 UTC for late Saturday games.
+[triggers]
+crons = ["*/30 * * * THU-SAT", "*/30 0-6 * * SUN"]
