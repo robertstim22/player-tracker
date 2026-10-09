@@ -128,7 +128,8 @@ async function updateFromApi() {
     const start = Date.parse(g.startDate);
     if (start > now) return false;
     const at = cache.boxAt[g.id];
-    return !at || Date.parse(at) < start + GAME_LEN;
+    // Skip games polled in the last 10 min (overlapping triggers) or already checked after the final whistle.
+    return !at || (Date.parse(at) < start + GAME_LEN && now - Date.parse(at) > 10 * 60e3);
   });
   const weeks = new Map();
   for (const g of need) weeks.set(`${g.seasonType}|${g.week}`, { week: g.week, seasonType: g.seasonType });
