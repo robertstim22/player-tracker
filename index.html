@@ -54,6 +54,8 @@
   .row .who { font-size:15px; color:var(--text); font-weight:600; }
   .hl { display:inline-block; font-size:12px; font-weight:600; padding:2px 8px; border-radius:99px; margin:6px 6px 0 0; background:var(--bg); color:var(--text); }
   .hl.big { background:var(--accent); color:#fff; }
+  .play { margin:6px 0; font-size:15px; }
+  .row .hl { margin:0 0 0 6px; }
   .toggle { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--muted); margin-bottom:10px; }
   .err { color:var(--live); font-size:13px; }
 </style>
@@ -100,18 +102,20 @@ function ago(iso) {
 
 function renderFeed() {
   if (!DATA) return;
-  const items = DATA.players.flatMap((p) => p.games.filter((g) => g.updatedAt && g.stats && Object.keys(g.stats).length).map((g) => ({ p, g })))
-    .sort((a, b) => b.g.updatedAt.localeCompare(a.g.updatedAt)).slice(0, 150);
-  const shown = feedBigOnly ? items.filter((x) => x.g.highlights.some((h) => h.big)) : items;
+  const items = DATA.players.flatMap((p) => p.games.flatMap((g) => (g.plays || []).map((pl) => ({ p, g, pl }))))
+    .filter((x) => x.pl.at)
+    .sort((a, b) => b.pl.at.localeCompare(a.pl.at)).slice(0, 200);
+  const isBig = (x) => x.pl.tags.some((t) => t.big);
+  const shown = feedBigOnly ? items.filter(isBig) : items;
   $("feed").innerHTML = `<label class="toggle"><input type="checkbox" id="bigOnly" ${feedBigOnly ? "checked" : ""}> Big moments only</label>` +
-    (shown.map(({ p, g }) => {
-      const vs = `${g.home ? "vs" : "@"} ${esc(g.opponent)}`;
-      const res = g.score ? (g.live ? `${g.score.team}–${g.score.opp}` : `${g.score.team > g.score.opp ? "W" : "L"} ${g.score.team}–${g.score.opp}`) : "";
-      return `<div class="row${g.highlights.some((h) => h.big) ? " big" : ""}">
-        <div class="top"><span class="who"><span class="pos">${esc(p.pos)}</span>${esc(p.name)}</span><span>${g.live ? '<span class="tag live">LIVE</span> ' : ""}${ago(g.updatedAt)}</span></div>
-        <div class="top"><span>${esc(p.team)} ${vs}</span><span>${res}</span></div>
-        ${hlHtml(g)}${statsHtml(g.stats)}</div>`;
-    }).join("") || `<div class="none">No activity yet.</div>`);
+    (shown.map((x) => {
+      const { p, g, pl } = x;
+      const tags = pl.tags.map((t) => `<span class="hl${t.big ? " big" : ""}">${esc(t.label)}</span>`).join("");
+      return `<div class="row${isBig(x) ? " big" : ""}">
+        <div class="top"><span class="who"><span class="pos">${esc(p.pos)}</span>${esc(p.name)}</span><span>${g.live ? '<span class="tag live">LIVE</span> ' : ""}${ago(pl.at)}</span></div>
+        <div class="play">${esc(pl.text)}</div>
+        <div class="top"><span>Q${esc(pl.q ?? "")} ${esc(pl.clock ?? "")} · ${g.home ? "vs" : "@"} ${esc(g.opponent)}</span><span>${tags}</span></div></div>`;
+    }).join("") || `<div class="none">No plays yet — they show up here once a game starts.</div>`);
   $("bigOnly").addEventListener("change", (e) => { feedBigOnly = e.target.checked; renderFeed(); });
 }
 

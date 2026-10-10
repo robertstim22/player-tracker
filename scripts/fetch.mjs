@@ -114,7 +114,56 @@ async function espnGame(g) {
       })),
     };
   }
-  return { state: comp.status?.type?.state, scores, sides };
+  const drives = [...(d.drives?.previous ?? []), ...(d.drives?.current ? [d.drives.current] : [])];
+  const plays = drives.flatMap((dr) => dr.plays ?? []).map((p) => ({
+    id: p.id, text: p.text ?? "", type: p.type?.text ?? "", period: p.period?.number, clock: p.clock?.displayValue,
+    yds: p.statYardage, scoring: !!p.scoringPlay, turnover: !!p.isTurnover, at: p.wallclock,
+  }));
+  return { state: comp.status?.type?.state, scores, sides, plays };
+}
+
+// ---- Play-by-play -------------------------------------------------------
+const cleanPlay = (t) => t
+  .replace(/^\(\d+:\d+\)\s*/, "")
+  .replace(/#\d+\s*/g, "")
+  .replace(/\b(?:No Huddle-Shotgun|No Huddle-Pistol|No Huddle|Shotgun|Pistol)\s*/gi, "")
+  .replace(/,?\s*End Of Play/gi, "")
+  .trim();
+
+function playTags(p) {
+  const tags = [];
+  const t = p.text.toLowerCase();
+  if (p.scoring) tags.push({ label: /touchdown/.test(t) ? "TD" : "Score", big: true });
+  if (p.turnover || /intercept/.test(t)) tags.push({ label: /intercept/.test(t) ? "INT" : "Turnover", big: true });
+  else if (/fumble/.test(t)) tags.push({ label: "Fumble", big: true });
+  if (/\bsack/.test(t)) tags.push({ label: "Sack", big: true });
+  if (/broken up by/.test(t)) tags.push({ label: "PBU", big: false });
+  if (p.yds >= 35 && /(pass|rush|run)/.test(t)) tags.push({ label: `${p.yds} yds`, big: true });
+  return tags;
+}
+
+// Plays from `plays` in which `name` made the play (not merely targeted or penalized).
+function playerPlays(name, plays) {
+  const t = tokens(name);
+  const first = t[0]?.[0], last = t.at(-1);
+  if (!first || !last) return [];
+  const who = `\\b${first}\\.\\s?${last}\\b`;
+  const mention = new RegExp(who);
+  const credited = new RegExp(`(?:broken up|hurried) by[^,]*?${who}`);
+  const tackle = new RegExp(`\\([^)]*${who}`);
+  const out = [], seen = new Set();
+  for (const p of plays) {
+    if (seen.has(p.id)) continue; // ESPN can list a play under two drives
+    seen.add(p.id);
+    const low = p.text.toLowerCase().replace(/['’]/g, "");
+    if (!mention.test(low) || /penalty/i.test(p.type)) continue;
+    // On incompletions only count defenders credited with the breakup/hurry, not the targeted receiver.
+    if (/incomplet/i.test(p.type + " " + low) && !credited.test(low)) continue;
+    const tags = playTags(p);
+    if (tackle.test(low) && !tags.some((t) => t.label === "PBU")) tags.unshift({ label: "Tackle", big: false });
+    out.push({ id: p.id, q: p.period, clock: p.clock, at: p.at, yds: p.yds, text: cleanPlay(p.text), tags });
+  }
+  return out;
 }
 
 const pkey = (p) => `${p.name}|${p.team}`;
@@ -161,17 +210,19 @@ async function updateFromApi() {
 
   // 2) Box scores. ESPN (free, live, same game ids as CFBD) is primary; CFBD box scores
   // are the fallback once a game is over. Finished games are fetched once and then frozen.
-  cache.state ??= {};
+  cache.state ??= {}; cache.plays ??= {}; cache.playsDone ??= {}; cache.noEspnAt ??= {};
   const started = cache.games.filter((g) => Date.parse(g.startDate) <= now);
   const isFinal = (g) =>
     cache.state[g.id] === "post" ||
     (cache.state[g.id] === undefined && cache.boxAt[g.id] && Date.parse(cache.boxAt[g.id]) >= Date.parse(g.startDate) + GAME_LEN);
-  const need = started.filter((g) => !isFinal(g) &&
-    // skip games polled in the last 10 min (overlapping triggers)
-    !(cache.boxAt[g.id] && now - Date.parse(cache.boxAt[g.id]) < 10 * 60e3));
+  const need = started.filter((g) =>
+    (!isFinal(g) || !cache.playsDone[g.id]) &&
+    // skip games polled in the last 10 min (overlapping triggers) or that ESPN doesn't cover (retry daily)
+    !(cache.boxAt[g.id] && now - Date.parse(cache.boxAt[g.id]) < 10 * 60e3) &&
+    !(cache.noEspnAt[g.id] && now - Date.parse(cache.noEspnAt[g.id]) < 24 * HOUR));
 
   // Store one game's results. `sideFor(team)` returns a CFBD-shaped side ({categories}) or undefined.
-  function record(g, scores, sideFor) {
+  function record(g, scores, sideFor, plays = null) {
     cache.scores[g.id] = scores;
     for (const p of active.filter((p) => p.team === g.home || p.team === g.away)) {
       const side = sideFor(p.team);
@@ -185,7 +236,9 @@ async function updateFromApi() {
         (cache.changed[k] ??= {})[g.id] = new Date(prev === undefined && now > finished ? finished : now).toISOString();
       }
       (cache.lines[k] ??= {})[g.id] = next;
+      if (plays) (cache.plays[k] ??= {})[g.id] = playerPlays(p.name, plays);
     }
+    if (plays?.length) cache.playsDone[g.id] = true;
     cache.boxAt[g.id] = new Date().toISOString();
   }
 
@@ -195,9 +248,9 @@ async function updateFromApi() {
     for (let g; (g = queue.shift()); ) {
       try {
         const e = await espnGame(g, g.home, g.away);
-        if (!e) { fallback.push(g); continue; }
+        if (!e) { cache.noEspnAt[g.id] = new Date().toISOString(); fallback.push(g); continue; }
         cache.state[g.id] = e.state;
-        record(g, e.scores, (team) => e.sides[team]);
+        record(g, e.scores, (team) => e.sides[team], e.plays);
       } catch (err) {
         console.warn(`ESPN failed for game ${g.id}: ${err.message}`);
         fallback.push(g);
@@ -237,6 +290,7 @@ async function updateFromApi() {
         score: sc && sc[p.team] != null ? { team: sc[p.team], opp: sc[home ? g.away : g.home] } : null,
         stats: cache.lines[pkey(p)]?.[g.id] ?? {},
         updatedAt: cache.changed[pkey(p)]?.[g.id] ?? null,
+        plays: now - start < 10 * 24 * HOUR ? cache.plays[pkey(p)]?.[g.id] ?? [] : [],
       });
       out.games.at(-1).highlights = highlights(out.games.at(-1).stats);
     }
