@@ -34,6 +34,8 @@
   .tag.live { color:var(--live); border-color:var(--live); }
   .controls { max-width:1100px; margin:10px auto 0; padding:0 16px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
   .controls input { flex:1 1 180px; min-width:0; padding:8px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--text); font:inherit; }
+  .controls select { padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--text); font:inherit; font-size:13px; }
+  .chip.live.on { background:var(--live); border-color:var(--live); }
   .chips { display:flex; flex-wrap:wrap; gap:6px; }
   .chip { border:1px solid var(--line); background:var(--card); color:var(--text); padding:4px 10px; border-radius:99px; font:inherit; font-size:13px; cursor:pointer; }
   .chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -65,6 +67,8 @@
 <div class="controls" id="controls">
   <input id="q" type="search" placeholder="Search player or team…">
   <div class="chips" id="groups"></div>
+  <div class="chips" id="status-chips"></div>
+  <select id="sort" aria-label="Sort players"><option value="recent">Sort: Recent activity</option><option value="time">Sort: Game time</option></select>
   <div class="chips" id="positions"></div>
 </div>
 <div class="banner" id="banner"></div>
@@ -131,7 +135,8 @@ function gameHtml(g) {
 
 const GROUPS = [["all","All"],["roster","Roster"],["nil","NIL"],["prospect","2027 Prospects"]];
 const POS_ORDER = ["QB","RB","WR","TE","OL","DE","DT","LB","CB","S"];
-const filter = { group:"all", pos:"all", q:"" };
+const filter = { group:"all", pos:"all", status:"all", q:"" };
+let sortBy = "recent";
 let DATA = null, view = "players", feedBigOnly = false;
 
 function cardHtml(p) {
@@ -173,14 +178,21 @@ function render() {
   const list = DATA.players.filter((p) =>
     (filter.group === "all" || p.groups.includes(filter.group)) &&
     (filter.pos === "all" || p.pos === filter.pos) &&
+    (filter.status === "all" || p.games.some((g) => g.live)) &&
     (!q || `${p.name} ${p.team}`.toLowerCase().includes(q)));
   // Players with a game in progress first, then most recent game, then name.
   const rank = (p) => p.games.some((g) => g.live) ? 0 : 1;
   const last = (p) => p.games.filter((g) => new Date(g.date) <= new Date()).at(-1)?.date ?? "";
-  list.sort((a, b) => rank(a) - rank(b) || last(b).localeCompare(last(a)) || a.name.localeCompare(b.name));
+  // "Game time": live games first, then the soonest upcoming kickoff; players with no game left go last.
+  const upcoming = (p) => (p.games.find((g) => g.live) ?? p.games.find((g) => new Date(g.date) > new Date()))?.date ?? "9";
+  if (sortBy === "time") list.sort((a, b) => rank(a) - rank(b) || upcoming(a).localeCompare(upcoming(b)) || a.name.localeCompare(b.name));
+  else list.sort((a, b) => rank(a) - rank(b) || last(b).localeCompare(last(a)) || a.name.localeCompare(b.name));
   $("grid").innerHTML = list.map(cardHtml).join("") || `<div class="none">No players match.</div>`;
   const present = POS_ORDER.filter((x) => DATA.players.some((p) => p.pos === x));
   chips($("groups"), GROUPS, "group");
+  const liveCount = DATA.players.filter((p) => p.games.some((g) => g.live)).length;
+  chips($("status-chips"), [["all", "All games"], ["live", `Live now (${liveCount})`]], "status");
+  $("status-chips").querySelector("[data-v=live]").classList.add("live");
   chips($("positions"), [["all","All positions"], ...present.map((x) => [x, x])], "pos");
 }
 
@@ -202,7 +214,8 @@ document.querySelector(".tabs").addEventListener("click", (e) => {
   render();
 });
 $("q").addEventListener("input", (e) => { filter.q = e.target.value; render(); });
-for (const [id, key] of [["groups","group"],["positions","pos"]]) {
+$("sort").addEventListener("change", (e) => { sortBy = e.target.value; render(); });
+for (const [id, key] of [["groups","group"],["positions","pos"],["status-chips","status"]]) {
   $(id).addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (b) { filter[key] = b.dataset.v; render(); } });
 }
 load();
