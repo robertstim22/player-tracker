@@ -22,7 +22,7 @@ const readJson = async (p, fallback) => {
 };
 const cfg = await readJson("../players.json");
 
-let calls = 0;
+let calls = 0, calls_espn = 0;
 async function api(path, params) {
   calls++;
   const url = `${BASE}${path}?${new URLSearchParams(params)}`;
@@ -81,6 +81,42 @@ function highlights(stats) {
   return out;
 }
 
+const ESPN = process.env.ESPN_BASE ?? "https://site.api.espn.com/apis/site/v2/sports/football/college-football";
+const normTeam = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+// One ESPN game summary, reshaped like CFBD's box score. Returns null if no box score yet.
+async function espnGame(g) {
+  calls_espn++;
+  const res = await fetch(`${ESPN}/summary?event=${g.id}`);
+  if (!res.ok) throw new Error(`${res.status}`);
+  const d = await res.json();
+  const comp = d.header?.competitions?.[0];
+  const boxPlayers = d.boxscore?.players ?? [];
+  if (!comp || !boxPlayers.length) return null;
+  // Map each ESPN team id to our CFBD team name (by name, falling back to home/away).
+  const ours = {};
+  for (const c of comp.competitors ?? []) {
+    const loc = normTeam(c.team?.location);
+    ours[c.team.id] = loc === normTeam(g.home) ? g.home : loc === normTeam(g.away) ? g.away : c.homeAway === "home" ? g.home : g.away;
+  }
+  const sides = {}, scores = {};
+  for (const c of comp.competitors ?? []) scores[ours[c.team.id]] = c.score != null ? Number(c.score) : null;
+  for (const t of boxPlayers) {
+    const name = ours[t.team?.id];
+    if (!name) continue;
+    sides[name] = {
+      categories: (t.statistics ?? []).map((cat) => ({
+        name: cat.name,
+        types: (cat.labels ?? []).map((label, i) => ({
+          name: label,
+          athletes: (cat.athletes ?? []).map((a) => ({ name: a.athlete?.displayName ?? "", stat: a.stats?.[i] })),
+        })),
+      })),
+    };
+  }
+  return { state: comp.status?.type?.state, scores, sides };
+}
+
 const pkey = (p) => `${p.name}|${p.team}`;
 
 async function updateFromApi() {
@@ -123,38 +159,63 @@ async function updateFromApi() {
     }
   }
 
-  // 2) Box scores for games that started and haven't been checked since finishing.
-  const need = cache.games.filter((g) => {
-    const start = Date.parse(g.startDate);
-    if (start > now) return false;
-    const at = cache.boxAt[g.id];
-    // Skip games polled in the last 10 min (overlapping triggers) or already checked after the final whistle.
-    return !at || (Date.parse(at) < start + GAME_LEN && now - Date.parse(at) > 10 * 60e3);
-  });
+  // 2) Box scores. ESPN (free, live, same game ids as CFBD) is primary; CFBD box scores
+  // are the fallback once a game is over. Finished games are fetched once and then frozen.
+  cache.state ??= {};
+  const started = cache.games.filter((g) => Date.parse(g.startDate) <= now);
+  const isFinal = (g) =>
+    cache.state[g.id] === "post" ||
+    (cache.state[g.id] === undefined && cache.boxAt[g.id] && Date.parse(cache.boxAt[g.id]) >= Date.parse(g.startDate) + GAME_LEN);
+  const need = started.filter((g) => !isFinal(g) &&
+    // skip games polled in the last 10 min (overlapping triggers)
+    !(cache.boxAt[g.id] && now - Date.parse(cache.boxAt[g.id]) < 10 * 60e3));
+
+  // Store one game's results. `sideFor(team)` returns a CFBD-shaped side ({categories}) or undefined.
+  function record(g, scores, sideFor) {
+    cache.scores[g.id] = scores;
+    for (const p of active.filter((p) => p.team === g.home || p.team === g.away)) {
+      const side = sideFor(p.team);
+      if (!side) continue;
+      const k = pkey(p);
+      const prev = cache.lines[k]?.[g.id];
+      const next = boxLines(side, p.name);
+      if (JSON.stringify(prev) !== JSON.stringify(next) && Object.keys(next).length) {
+        // First sighting of an already-finished game: date it to the final whistle, not "now".
+        const finished = Date.parse(g.startDate) + GAME_LEN;
+        (cache.changed[k] ??= {})[g.id] = new Date(prev === undefined && now > finished ? finished : now).toISOString();
+      }
+      (cache.lines[k] ??= {})[g.id] = next;
+    }
+    cache.boxAt[g.id] = new Date().toISOString();
+  }
+
+  const fallback = [];
+  const queue = [...need];
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    for (let g; (g = queue.shift()); ) {
+      try {
+        const e = await espnGame(g, g.home, g.away);
+        if (!e) { fallback.push(g); continue; }
+        cache.state[g.id] = e.state;
+        record(g, e.scores, (team) => e.sides[team]);
+      } catch (err) {
+        console.warn(`ESPN failed for game ${g.id}: ${err.message}`);
+        fallback.push(g);
+      }
+    }
+  }));
+
+  const stale = fallback.filter((g) => now > Date.parse(g.startDate) + GAME_LEN);
   const weeks = new Map();
-  for (const g of need) weeks.set(`${g.seasonType}|${g.week}`, { week: g.week, seasonType: g.seasonType });
+  for (const g of stale) weeks.set(`${g.seasonType}|${g.week}`, { week: g.week, seasonType: g.seasonType });
   for (const { week, seasonType } of weeks.values()) {
     const boxes = await api("/games/players", { year, week, seasonType });
     const byId = new Map(boxes.map((b) => [b.id, b]));
-    for (const g of need.filter((g) => g.week === week && g.seasonType === seasonType)) {
+    for (const g of stale.filter((g) => g.week === week && g.seasonType === seasonType)) {
       const box = byId.get(g.id);
       if (!box) continue;
       const sides = Object.fromEntries((box.teams ?? []).map((t) => [t.team, t]));
-      cache.scores[g.id] = { [g.home]: sides[g.home]?.points ?? null, [g.away]: sides[g.away]?.points ?? null };
-      for (const p of active.filter((p) => p.team === g.home || p.team === g.away)) {
-        const side = sides[p.team];
-        if (!side) continue;
-        const k = pkey(p);
-        const prev = cache.lines[k]?.[g.id];
-        const next = boxLines(side, p.name);
-        if (JSON.stringify(prev) !== JSON.stringify(next) && Object.keys(next).length) {
-          // First sighting of an already-finished game: date it to the final whistle, not "now".
-          const finished = Date.parse(g.startDate) + GAME_LEN;
-          (cache.changed[k] ??= {})[g.id] = new Date(prev === undefined && now > finished ? finished : now).toISOString();
-        }
-        (cache.lines[k] ??= {})[g.id] = next;
-      }
-      cache.boxAt[g.id] = new Date().toISOString();
+      record(g, { [g.home]: sides[g.home]?.points ?? null, [g.away]: sides[g.away]?.points ?? null }, (team) => sides[team]);
     }
   }
 
@@ -168,7 +229,8 @@ async function updateFromApi() {
       const start = Date.parse(g.startDate);
       const home = g.home === p.team;
       const sc = cache.scores[g.id];
-      const completed = g.completed || now > start + GAME_LEN;
+      const st = cache.state?.[g.id];
+      const completed = g.completed || st === "post" || now > start + (st === "in" ? 8 * HOUR : GAME_LEN);
       out.games.push({
         week: g.week, date: g.startDate, opponent: home ? g.away : g.home, home,
         completed, live: start <= now && !completed,
@@ -204,6 +266,6 @@ await writeFile(
   here("../data/stats.json"),
   JSON.stringify({ year: cfg.year, updatedAt: new Date().toISOString(), demo, warnings: result.warnings, players: result.players }),
 );
-console.log(`Wrote ${result.players.length} players using ${calls} API call(s).`);
+console.log(`Wrote ${result.players.length} players using ${calls} CFBD call(s) and ${calls_espn} ESPN call(s).`);
 for (const w of result.warnings.slice(0, 10)) console.warn("WARNING:", w);
 if (result.warnings.length > 10) console.warn(`...and ${result.warnings.length - 10} more warnings (see data/stats.json)`);
