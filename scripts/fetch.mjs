@@ -233,11 +233,17 @@ async function updateFromApi() {
   const isFinal = (g) =>
     cache.state[g.id] === "post" ||
     (cache.state[g.id] === undefined && cache.boxAt[g.id] && Date.parse(cache.boxAt[g.id]) >= Date.parse(g.startDate) + GAME_LEN);
+  // A game ESPN has no box score for only counts as "not covered" if it was checked after it
+  // ended; right at kickoff the box score simply doesn't exist yet, so keep retrying then.
+  const espnSkipped = (g) => {
+    const at = cache.noEspnAt[g.id] && Date.parse(cache.noEspnAt[g.id]);
+    return at && at >= Date.parse(g.startDate) + GAME_LEN && now - at < 24 * HOUR;
+  };
   const need = started.filter((g) =>
     (!isFinal(g) || !cache.playsDone[g.id]) &&
     // skip games polled in the last 10 min (overlapping triggers) or that ESPN doesn't cover (retry daily)
     !(cache.boxAt[g.id] && now - Date.parse(cache.boxAt[g.id]) < 10 * 60e3) &&
-    !(cache.noEspnAt[g.id] && now - Date.parse(cache.noEspnAt[g.id]) < 24 * HOUR));
+    !espnSkipped(g));
 
   // Store one game's results. `sideFor(team)` returns a CFBD-shaped side ({categories}) or undefined.
   function record(g, scores, sideFor, plays = null) {
@@ -266,7 +272,11 @@ async function updateFromApi() {
     for (let g; (g = queue.shift()); ) {
       try {
         const e = await espnGame(g, g.home, g.away);
-        if (!e) { cache.noEspnAt[g.id] = new Date().toISOString(); fallback.push(g); continue; }
+        if (!e) {
+          if (now > Date.parse(g.startDate) + GAME_LEN) cache.noEspnAt[g.id] = new Date().toISOString();
+          fallback.push(g);
+          continue;
+        }
         cache.state[g.id] = e.state;
         record(g, e.scores, (team) => e.sides[team], e.plays);
       } catch (err) {
