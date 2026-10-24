@@ -23,12 +23,23 @@ const readJson = async (p, fallback) => {
 const cfg = await readJson("../players.json");
 
 let calls = 0, calls_espn = 0;
+// CFBD occasionally returns 5xx or hangs; retry briefly, then let the caller decide.
 async function api(path, params) {
-  calls++;
   const url = `${BASE}${path}?${new URLSearchParams(params)}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${KEY}` } });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
-  return res.json();
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 2000 * attempt));
+    calls++;
+    try {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${KEY}` }, signal: AbortSignal.timeout(20000) });
+      if (res.ok) return res.json();
+      lastErr = new Error(`${res.status} ${res.statusText} for ${url}`);
+      if (res.status < 500) break; // 4xx won't fix itself
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }
 
 // "Josh Alexander Felton" ~ "Josh Felton"; ignores punctuation and Jr/II/III.
@@ -178,29 +189,36 @@ async function updateFromApi() {
   cache.boxAt ??= {}; cache.lines ??= {}; cache.scores ??= {}; cache.changed ??= {};
   const warnings = [];
 
-  // 1) Schedule + season totals, at most every ~20h.
+  // 1) Schedule + season totals, at most every ~20h. If CFBD is down we keep the cached copy
+  // (ESPN still supplies live stats) and try again on the next run.
   if (!cache.fetchedAt || now - Date.parse(cache.fetchedAt) > 20 * HOUR) {
-    const types = ["regular"];
-    const m = new Date().getUTCMonth();
-    if (m === 11 || m === 0) types.push("postseason");
-    const all = (await Promise.all(types.map((seasonType) => api("/games", { year, seasonType })))).flat();
-    cache.games = all
-      .filter((g) => teams.has(g.homeTeam) || teams.has(g.awayTeam))
-      .map((g) => ({
-        id: g.id, week: g.week, seasonType: g.seasonType, startDate: g.startDate,
-        completed: !!g.completed, home: g.homeTeam, away: g.awayTeam,
-        homePoints: g.homePoints, awayPoints: g.awayPoints,
-      }));
-    const rows = await api("/stats/player/season", { year });
-    cache.season = {};
-    for (const p of active) {
-      for (const r of rows) {
-        if (r.team === p.team && sameName(r.player, p.name)) {
-          ((cache.season[pkey(p)] ??= {})[r.category] ??= {})[r.statType] = r.stat;
+    try {
+      const types = ["regular"];
+      const m = new Date().getUTCMonth();
+      if (m === 11 || m === 0) types.push("postseason");
+      const all = (await Promise.all(types.map((seasonType) => api("/games", { year, seasonType })))).flat();
+      const rows = await api("/stats/player/season", { year });
+      cache.games = all
+        .filter((g) => teams.has(g.homeTeam) || teams.has(g.awayTeam))
+        .map((g) => ({
+          id: g.id, week: g.week, seasonType: g.seasonType, startDate: g.startDate,
+          completed: !!g.completed, home: g.homeTeam, away: g.awayTeam,
+          homePoints: g.homePoints, awayPoints: g.awayPoints,
+        }));
+      cache.season = {};
+      for (const p of active) {
+        for (const r of rows) {
+          if (r.team === p.team && sameName(r.player, p.name)) {
+            ((cache.season[pkey(p)] ??= {})[r.category] ??= {})[r.statType] = r.stat;
+          }
         }
       }
+      cache.fetchedAt = new Date().toISOString();
+    } catch (err) {
+      if (!cache.games) throw err; // first run: nothing to fall back on
+      console.warn(`CFBD schedule refresh failed, using cached copy: ${err.message}`);
+      warnings.push("CollegeFootballData was unreachable; schedule and season totals may be out of date.");
     }
-    cache.fetchedAt = new Date().toISOString();
   }
   for (const t of teams) {
     if (!cache.games.some((g) => g.home === t || g.away === t)) {
@@ -262,7 +280,13 @@ async function updateFromApi() {
   const weeks = new Map();
   for (const g of stale) weeks.set(`${g.seasonType}|${g.week}`, { week: g.week, seasonType: g.seasonType });
   for (const { week, seasonType } of weeks.values()) {
-    const boxes = await api("/games/players", { year, week, seasonType });
+    let boxes;
+    try {
+      boxes = await api("/games/players", { year, week, seasonType });
+    } catch (err) {
+      console.warn(`CFBD box-score fallback failed for week ${week}: ${err.message}`);
+      continue;
+    }
     const byId = new Map(boxes.map((b) => [b.id, b]));
     for (const g of stale.filter((g) => g.week === week && g.seasonType === seasonType)) {
       const box = byId.get(g.id);
